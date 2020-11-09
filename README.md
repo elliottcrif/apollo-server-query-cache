@@ -1,8 +1,6 @@
 # Apollo Server Query Cache
 
-Full Query Response cache plugin for [Apollo Server](https://github.com/apollographql/apollo-server)
-
-Heavily based off of [Apollo Server Plugin Response Cache](https://github.com/apollographql/apollo-server/tree/main/packages/apollo-server-plugin-response-cache)
+Full Query Response cache plugin for [Apollo Server](https://github.com/apollographql/apollo-server). Heavily based off of [Apollo Server Plugin Response Cache](https://github.com/apollographql/apollo-server/tree/main/packages/apollo-server-plugin-response-cache).
 
 ## Enhancements
 
