@@ -11,7 +11,8 @@ Heavily based off of [Apollo Server Plugin Response Cache](https://github.com/ap
   
 ## Example Usage
 
-```const queryResponseCachePlugin = QueryResponseCachePlugin({
+```
+const queryResponseCachePlugin = QueryResponseCachePlugin({
   // the cache key data should provide at the very least the operationName
   cacheKeyData: (context) => ({
     operationName: context.operationName!,
@@ -21,7 +22,8 @@ Heavily based off of [Apollo Server Plugin Response Cache](https://github.com/ap
     host: "localhost",
     port: 6379,
   }),
-});```
+});
+```
 
 
 
