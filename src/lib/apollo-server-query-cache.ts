@@ -7,28 +7,66 @@ import { KeyValueCache, PrefixingKeyValueCache } from "apollo-server-caching";
 import { ValueOrPromise } from "apollo-server-types";
 import { CacheHint, CacheScope } from "apollo-cache-control";
 
+// XXX This should use createSHA from apollo-server-core in order to work on
+// non-Node environments. I'm not sure where that should end up ---
+// apollo-server-sha as its own tiny module? apollo-server-env seems bad because
+// that would add sha.js to unnecessary places, I think?
 import { createHash } from "crypto";
 
-interface ContextualCacheKey {
-  sessionMode: SessionMode;
-  sessionId?: string | null;
-}
-
-interface CacheOptions<TContext = Record<string, any>> {
-  // Underlying cache used to save results. Will default to
-  // cache passed to the apollo server constructor
+interface Options<TContext = Record<string, any>> {
+  // Underlying cache used to save results. All writes will be under keys that
+  // start with 'fqc:' and are followed by a fixed-size cryptographic hash of a
+  // JSON object with keys representing the query document, operation name,
+  // variables, and other keys derived from the sessionId and extraCacheKeyData
+  // hooks. If not provided, use the cache in the GraphQLRequestContext instead
+  // (ie, the cache passed to the ApolloServer constructor).
   cache?: KeyValueCache;
 
-  // Used when cache scope is PRIVATE. This should return the sessionId of the current user session
-  // if any.
+  // Define this hook if you're setting any cache hints with scope PRIVATE.
+  // This should return a session ID if the user is "logged in", or null if
+  // there is no "logged in" user.
+  //
+  // If a cachable response has any PRIVATE nodes, then:
+  // - If this hook is not defined, a warning will be logged and it will not be cached.
+  // - Else if this hook returns null, it will not be cached.
+  // - Else it will be cached under a cache key tagged with the session ID and
+  //   mode "private".
+  //
+  // If a cachable response has no PRIVATE nodes, then:
+  // - If this hook is not defined or returns null, it will be cached under a cache
+  //   key tagged with the mode "no session".
+  // - Else it will be cached under a cache key tagged with the mode
+  //   "authenticated public".
+  //
+  // When reading from the cache:
+  // - If this hook is not defined or returns null, look in the cache under a cache
+  //   key tagged with the mode "no session".
+  // - Else look in the cache under a cache key tagged with the session ID and the
+  //   mode "private". If no response is found in the cache, then look under a cache
+  //   key tagged with the mode "authenticated public".
+  //
+  // This allows the cache to provide different "public" results to anonymous
+  // users and logged in users ("no session" vs "authenticated public").
+  //
+  // A common implementation of this hook would be to look in
+  // requestContext.request.http.headers for a specific authentication header or
+  // cookie.
+  //
+  // This hook may return a promise because, for example, you might need to
+  // validate a cookie against an external service.
   sessionId?(
     requestContext: GraphQLRequestContext<TContext>
   ): ValueOrPromise<string | null>;
 
-  // custom cache key for each cached response
-  cacheKey(
+  // Define this hook if you want the cache key to vary based on some aspect of
+  // the request other than the query document, operation name, variables, and
+  // session ID. For example, responses that include translatable text may want
+  // to return a string derived from
+  // requestContext.request.http.headers.get('Accept-Language'). The data may
+  // be anything that can be JSON-stringified.
+  cacheKeyData?(
     requestContext: GraphQLRequestContext<TContext>
-  ): ValueOrPromise<Record<string, any> & ContextualCacheKey>;
+  ): ValueOrPromise<BaseCacheKey>;
 
   // If this hook is defined and returns false, the plugin will not read
   // responses from the cache.
@@ -47,6 +85,16 @@ enum SessionMode {
   NoSession,
   Private,
   AuthenticatedPublic,
+}
+
+function sha(s: string) {
+  return createHash("sha256").update(s).digest("hex");
+}
+
+interface BaseCacheKey {
+  operationName: string;
+  variables: { [name: string]: any };
+  [key: string]: any;
 }
 
 interface ContextualCacheKey {
@@ -70,14 +118,10 @@ interface CacheValue {
   cacheTime: number; // epoch millis, used to calculate Age header
 }
 
-type CacheKey = Record<string, any> & ContextualCacheKey;
+type CacheKey = BaseCacheKey & ContextualCacheKey;
 
-function sha256(s: string) {
-  return createHash("sha256").update(s).digest("hex");
-}
-
-function cacheKeyAsString(key: CacheKey) {
-  return sha256(JSON.stringify(key));
+function cacheKeyString(key: CacheKey) {
+  return sha(JSON.stringify(key));
 }
 
 function isGraphQLQuery(requestContext: GraphQLRequestContext<any>) {
@@ -87,7 +131,7 @@ function isGraphQLQuery(requestContext: GraphQLRequestContext<any>) {
 }
 
 export default function plugin(
-  options: CacheOptions = Object.create(null)
+  options: Options = Object.create(null)
 ): ApolloServerPlugin {
   return {
     requestDidStart(
@@ -99,7 +143,7 @@ export default function plugin(
       );
 
       let sessionId: string | null = null;
-      let cacheKey: CacheKey | null = null;
+      let cacheKey: BaseCacheKey | null = null;
       let age: number | null = null;
 
       return {
@@ -115,7 +159,7 @@ export default function plugin(
           async function cacheGet(
             contextualCacheKeyFields: ContextualCacheKey
           ): Promise<GraphQLResponse | null> {
-            const key = cacheKeyAsString({
+            const key = cacheKeyString({
               ...cacheKey!,
               ...contextualCacheKeyFields,
             });
@@ -134,12 +178,18 @@ export default function plugin(
           }
 
           // Call hooks. Save values which will be used in willSendResponse as well.
-          let extraCacheKeyData: any = null;
           if (options.sessionId) {
             sessionId = await options.sessionId(requestContext);
           }
 
-          cacheKey = await options.cacheKey(requestContext);
+          cacheKey = options.cacheKeyData
+            ? await options.cacheKeyData(requestContext)
+            : {
+                source: requestContext.source!,
+                operationName: requestContext.operationName!,
+                // Defensive copy just in case it somehow gets mutated.
+                variables: { ...(requestContext.request.variables || {}) },
+              };
 
           // Note that we set up sessionId and baseCacheKey before doing this
           // check, so that we can still write the result to the cache even if
@@ -222,7 +272,7 @@ export default function plugin(
           function cacheSetInBackground(
             contextualCacheKeyFields: ContextualCacheKey
           ) {
-            const key = cacheKeyAsString({
+            const key = cacheKeyString({
               ...cacheKey!,
               ...contextualCacheKeyFields,
             });
